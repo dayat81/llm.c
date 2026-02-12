@@ -76,7 +76,7 @@ graph TD
         K --> L(Softmax)
         L --> M{Cross Entropy Loss}
         M -->|Backward| N[Calculate Gradients]
-        N --> O[Update Weights (Adam)]
+        N --> O["Update Weights (Adam)"]
     end
 
     subgraph Inference_Agent_Loop
@@ -144,3 +144,188 @@ To build what you likely intended:
         action_token = model.generate(observation)
         execute_tool(action_token)
     ```
+
+### G. Detailed Component Logic
+
+#### 1. Multi-Head Attention (The "Communication" Layer)
+This allows tokens to "talk" to each other. For example, "LINK" looks for "DOWN".
+
+```mermaid
+graph TD
+    subgraph Multi_Head_Attention
+        Input[Input Embedding] --> Split{Split Heads}
+        Split --> H1[Head 1]
+        Split --> H2[Head 2]
+        Split --> H3[Head 3]
+        
+        subgraph Head_Logic
+            H1 --> Q["Query: What am I looking for?"]
+            H1 --> K["Key: What do I contain?"]
+            H1 --> V["Value: What info do I pass?"]
+            
+            Q & K --> MatMul(Dot Product)
+            MatMul --> Scale(Scale)
+            Scale --> SoftMax(Softmax Probabilities)
+            SoftMax & V --> WeightSum(Weighted Sum)
+        end
+        
+        WeightSum --> Concat{Concatenate Heads}
+        H2 --> Concat
+        H3 --> Concat
+        Concat --> Proj[Linear Projection]
+        Proj --> Output[Contextualized Embedding]
+    end
+```
+
+#### 2. Feed-Forward MLP (The "Thinking" Layer)
+This processes the information gathered by attention individually for each token.
+
+```mermaid
+graph TD
+    subgraph MLP_Block
+        X[Attention Output] --> Linear1[Linear Layer 4x Expansion]
+        Linear1 --> Act["Relu Squared Activation"]
+        Act --> Linear2[Linear Layer Projection]
+        Linear2 --> Out[Processed Token]
+    end
+```
+
+### H. Matrix Operations Detail
+
+#### 1. Attention Mechanism (The Math)
+Tracing the shapes for a single token sequence. 
+*   `B`: Batch Size (1 in this script)
+*   `T`: Sequence Length (block_size, e.g., 8)
+*   `C`: Embedding Dim (n_embd, e.g., 16)
+*   `H`: Heads (4)
+*   `HS`: Head Size (C/H = 4)
+
+```mermaid
+graph TD
+    subgraph Attention_Math ["Multi-Head Attention (Matrix Ops)"]
+        X["Input X <br/> Shape: (T, C)"]
+        
+        subgraph Projections
+            WQ["Wq Weights <br/> (C, C)"]
+            WK["Wk Weights <br/> (C, C)"]
+            WV["Wv Weights <br/> (C, C)"]
+            
+            X --"X @ Wq"--> Q["Q <br/> (T, C)"]
+            X --"X @ Wk"--> K["K <br/> (T, C)"]
+            X --"X @ Wv"--> V["V <br/> (T, C)"]
+        end
+        
+        subgraph Split_Heads ["Split into H Heads"]
+            Q --"Reshape"--> Qh["Q_h <br/> (H, T, HS)"]
+            K --"Reshape"--> Kh["K_h <br/> (H, T, HS)"]
+            V --"Reshape"--> Vh["V_h <br/> (H, T, HS)"]
+        end
+        
+        subgraph Scaled_Dot_Product
+            Qh & Kh --"Q @ K.T"--> Scores["Scores <br/> (H, T, T)"]
+            Scores --"/ sqrt(HS)"--> Scaled[Scaled Scores]
+            Scaled --"Softmax(dim=-1)"--> Attn["Attention Weights <br/> (H, T, T)"]
+            
+            Attn & Vh --"Attn @ V"--> HeadOut["Head Output <br/> (H, T, HS)"]
+        end
+        
+        HeadOut --"Concat"--> Concat["Concat Output <br/> (T, C)"]
+        
+        subgraph Final_Proj
+            WO["Wo Weights <br/> (C, C)"]
+            Concat --"Out @ Wo"--> Final["Attention Output <br/> (T, C)"]
+        end
+    end
+```
+
+#### 2. MLP (Feed Forward) Matrix Ops
+The "Pointwise" Feed Forward Network.
+
+```mermaid
+graph TD
+    subgraph MLP_Math ["MLP (Matrix Ops)"]
+        Input["Attention Output <br/> (T, C)"]
+        
+        subgraph Expansion_Layer
+            W1["W_fc1 <br/> (C, 4*C)"]
+            Input --"X @ W1"--> Hidden["Hidden State <br/> (T, 4*C)"]
+        end
+        
+        subgraph Activation
+            Hidden --"ReLU(x)^2"--> Activated["Activated State <br/> (T, 4*C)"]
+        end
+        
+        subgraph Projection_Layer
+            W2["W_fc2 <br/> (4*C, C)"]
+            Activated --"H @ W2"--> Output["MLP Output <br/> (T, C)"]
+        end
+    end
+```
+
+#### 3. Embedding Layer (The Input)
+Converts raw integers into vectors.
+*   `V`: Vocab Size (e.g., 65 characters)
+
+```mermaid
+graph TD
+    subgraph Embedding_Math ["Embedding (Matrix Ops)"]
+        Idx["Input Indices (Integer) <br/> Shape: (T)"]
+        
+        subgraph Lookup
+            WTE["Token Embeddings Table <br/> (V, C)"]
+            WPE["Positional Embeddings Table <br/> (T, C)"]
+            
+            Idx --"Gather"--> TokEmb["Token Vectors <br/> (T, C)"]
+            Pos["Range(0, T)"] --"Gather"--> PosEmb["Pos Vectors <br/> (T, C)"]
+        end
+        
+        TokEmb & PosEmb --"Element-wise Add"--> X["Input X <br/> (T, C)"]
+    end
+```
+
+#### 4. Layer Normalization (Stability)
+Applied before Attention and MLP (Pre-Norm).
+
+```mermaid
+graph TD
+    subgraph LayerNorm_Math ["RMSNorm (Matrix Ops)"]
+        Input["Input X <br/> (T, C)"]
+        
+        subgraph Norm_Calc
+            Input --"Square & Mean"--> Var["Variance <br/> (T, 1)"]
+            Var --"1 / sqrt(Var + eps)"--> InvStd["Inv Std Dev <br/> (T, 1)"]
+            Input & InvStd --"Element-wise Mul"--> Normed["Normalized X <br/> (T, C)"]
+        end
+        
+        subgraph Scaling
+            Gamma["Learnable Scale (Gamma) <br/> (C)"]
+            Normed & Gamma --"Element-wise Mul"--> Output["LayerOut <br/> (T, C)"]
+        end
+    end
+```
+
+#### 5. Final Head & Loss (The Output)
+Projecting back to vocabulary probabilities.
+
+```mermaid
+graph TD
+    subgraph Head_Loss_Math ["Head & Loss (Matrix Ops)"]
+        FinalHid["Transformer Output <br/> (T, C)"]
+        
+        subgraph Language_Head
+            Norm["Final LayerNorm <br/> (T, C)"]
+            LM_Head["Linear Weight <br/> (C, V)"]
+            
+            FinalHid --> Norm
+            Norm --"X @ LM_Head"--> Logits["Logits <br/> (T, V)"]
+        end
+        
+        subgraph Loss_Calculation
+            Targets["Target Indices (Integer) <br/> (T)"]
+            Logits --"Reshape"--> LogitsFlat["(T*C, V)"]
+            Targets --"Reshape"--> TargetsFlat["(T*C)"]
+            
+            LogitsFlat & TargetsFlat --"CrossEntropy"--> Loss["Scalar Loss <br/> (1)"]
+        end
+    end
+```
